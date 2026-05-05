@@ -349,9 +349,13 @@ router.delete("/classes/:id", authenticateUser, authorizeRoles("hod"), async (re
 // Get all offered subjects for HOD's department
 router.get("/offered-subjects", authenticateUser, authorizeRoles("hod"), async (req, res) => {
   try {
+    console.log('[offered-subjects] Request received');
+    console.log('[offered-subjects] User from token:', req.user);
+    
     const department_id = req.user.department_id;
 
     if (!department_id) {
+      console.error('[offered-subjects] No department_id in token');
       return res.status(403).json({
         success: false,
         error: "Department ID missing in token.",
@@ -365,7 +369,6 @@ router.get("/offered-subjects", authenticateUser, authorizeRoles("hod"), async (
         semester,
         year,
         faculty_ids,
-        created_at,
         subject:subject_id (
           id,
           name,
@@ -377,18 +380,26 @@ router.get("/offered-subjects", authenticateUser, authorizeRoles("hod"), async (
       .order("year", { ascending: true })
       .order("semester", { ascending: true });
 
-    if (error) throw error;
+    if (error) {
+      console.error('[offered-subjects] Supabase query error:', error);
+      throw error;
+    }
+
+    console.log(`[offered-subjects] department_id=${department_id}, rows found=${subjects?.length}`);
+    if (subjects?.length > 0) console.log('[offered-subjects] sample row:', JSON.stringify(subjects[0]));
 
     // Fetch faculty names for each subject
     const formattedSubjects = await Promise.all(
-      subjects.map(async (sub) => {
+      (subjects || []).map(async (sub) => {
         const facultyNames = [];
-        if (sub.faculty_ids && sub.faculty_ids.length > 0) {
-          const { data: faculties } = await supabase
+        const ids = Array.isArray(sub.faculty_ids) ? sub.faculty_ids : [];
+        if (ids.length > 0) {
+          const { data: faculties, error: facErr } = await supabase
             .from("users")
             .select("id, name")
-            .in("id", sub.faculty_ids);
-          
+            .in("id", ids);
+
+          if (facErr) console.error('[offered-subjects] faculty fetch error:', facErr);
           if (faculties) {
             facultyNames.push(...faculties.map(f => f.name));
           }
@@ -401,8 +412,7 @@ router.get("/offered-subjects", authenticateUser, authorizeRoles("hod"), async (
           type: sub.subject?.type || 'N/A',
           faculties: facultyNames,
           semester: sub.semester,
-          year: sub.year,
-          created_at: sub.created_at
+          year: sub.year
         };
       })
     );
@@ -529,13 +539,16 @@ router.post("/add-offered-subject", authenticateUser, authorizeRoles("hod"),
       }
 
       // ✅ Step 2: Insert into subjects
+      // MDM, OE, PE are elective subtypes — store as 'elective' to satisfy DB constraint
+      const dbType = ['MDM', 'OE', 'PE'].includes(type) ? 'elective' : type;
+
       const { data: subjectData, error: subjectError } = await supabase
         .from("subjects")
         .insert([
           {
             name,
             subject_code,
-            type,
+            type: dbType,
             department_id,
             class_id: null,
           },

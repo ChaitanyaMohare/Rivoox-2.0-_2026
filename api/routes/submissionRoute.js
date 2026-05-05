@@ -372,10 +372,20 @@ router.get("/students", authenticateUser, authorizeRoles("faculty", "class_teach
       if (typesError) throw typesError;
 
       // Filter submission types based on subject type and applicable_to
-      const applicableSubmissionTypes = (submissionTypes || []).filter(type => {
-        const applicableTo = type.applicable_to || [];
-        return applicableTo.includes(subjectType);
-      });
+      // Remove duplicates by name (keep only the first occurrence)
+      const seenNames = new Set();
+      const applicableSubmissionTypes = (submissionTypes || [])
+        .filter(type => {
+          const applicableTo = type.applicable_to || [];
+          return applicableTo.includes(subjectType);
+        })
+        .filter(type => {
+          if (seenNames.has(type.name)) {
+            return false;
+          }
+          seenNames.add(type.name);
+          return true;
+        });
 
 
       // Map submissions to students
@@ -446,30 +456,48 @@ router.post("/mark-submission", authenticateUser, authorizeRoles("faculty", "cla
         });
       }
 
-      // 🧩 3️⃣ Validate student belongs to same class/batch as faculty
-      // (Optional strictness)
-      // const { data: studentData } = await supabase
-      //   .from("students")
-      //   .select("class_id, batch_id")
-      //   .eq("id", student_id)
-      //   .single();
+      // 🧩 3️⃣ Validate student and check attendance for Defaulter work
+      const { data: studentData, error: studentError } = await supabase
+        .from("students")
+        .select("class_id, batch_id, attendance_percent")
+        .eq("id", student_id)
+        .single();
 
-      // TODO: add logic if you want to ensure class alignment for batch-based subjects
+      if (studentError) throw studentError;
+      if (!studentData) {
+        return res.status(404).json({
+          success: false,
+          error: "Student not found.",
+        });
+      }
 
-      // 🧩 4️⃣ Fetch submission type ID
-      const { data: subType, error: subTypeErr } = await supabase
+      // If marking Defaulter work, check attendance requirement
+      if (submission_type === 'Defaulter work') {
+        const attendancePercent = parseFloat(studentData.attendance_percent) || 0;
+        if (attendancePercent >= 75) {
+          return res.status(400).json({
+            success: false,
+            error: "Defaulter work is only applicable for students with attendance below 75%.",
+          });
+        }
+      }
+
+      // 🧩 4️⃣ Fetch submission type ID (handle duplicates by taking first match)
+      const { data: subTypes, error: subTypeErr } = await supabase
         .from("submission_types")
         .select("id")
         .eq("name", submission_type)
-        .maybeSingle();
+        .limit(1);
 
       if (subTypeErr) throw subTypeErr;
-      if (!subType) {
+      if (!subTypes || subTypes.length === 0) {
         return res.status(400).json({
           success: false,
           error: `Invalid submission_type: ${submission_type}.`,
         });
       }
+
+      const subType = subTypes[0];
 
       const submission_type_id = subType.id;
 

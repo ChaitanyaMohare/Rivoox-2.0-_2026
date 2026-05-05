@@ -1,5 +1,12 @@
 import dotenv from "dotenv";
-dotenv.config(); 
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load .env from project root (one level above /backend)
+dotenv.config({ path: resolve(__dirname, "../../.env") });
 
 import express from "express";
 import cors from "cors";
@@ -43,5 +50,12 @@ app.use("/api/export", exportRoutes);
 // app.listen(process.env.PORT, () => {
 //   console.log(`Server running on port ${process.env.PORT}`);
 // });
+
+const PORT = process.env.PORT || 3000;
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
 export default app;

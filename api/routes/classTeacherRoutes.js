@@ -6,7 +6,7 @@ import fs from "fs"
 import { supabase } from '../db/supabaseClient.js'
 import { authenticateUser, authorizeRoles  } from "../middlewares/auth.js";
 
-// const upload = multer({ dest: "uploads/" });
+const upload = multer({ dest: "uploads/" });
 const calculateDefaulter = (attendance) => attendance < 75;
 const router = express.Router();
 
@@ -634,7 +634,7 @@ router.post("/create-batch", authenticateUser, authorizeRoles("class_teacher", "
 });
 
 router.post("/import-students", authenticateUser, authorizeRoles("class_teacher", "faculty"),
-  // upload.single("file"),
+  upload.single("file"),
   async (req, res) => {
     try {
       if (!req.file)
@@ -903,11 +903,11 @@ router.get('/availability', authenticateUser, authorizeRoles("class_teacher", "f
   try {
     const userId = req.user.id;
     
-    // Get all availability records for this faculty
+    // Get all availability records for this faculty using user_id
     const { data, error } = await supabase
       .from('faculty_availability')
       .select('is_available')
-      .eq('faculty_id', userId)
+      .eq('user_id', userId)
       .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -941,11 +941,11 @@ router.put('/availability', authenticateUser, authorizeRoles("class_teacher", "f
       });
     }
 
-    // Delete all existing availability records for this faculty
+    // Delete all existing availability records for this faculty using user_id
     const { error: deleteError } = await supabase
       .from('faculty_availability')
       .delete()
-      .eq('faculty_id', userId);
+      .eq('user_id', userId);
 
     if (deleteError) {
       console.error('Error deleting old records:', deleteError);
@@ -973,8 +973,9 @@ router.put('/availability', authenticateUser, authorizeRoles("class_teacher", "f
         });
       }
 
+      // Insert with user_id
       const availabilityRecords = subjects.map(subject => ({
-        faculty_id: userId,
+        user_id: userId,
         subject_id: subject.id,
         is_available: true,
         updated_at: new Date().toISOString()
@@ -1008,7 +1009,7 @@ router.get('/available-subjects', authenticateUser, authorizeRoles("class_teache
   try {
     const userId = req.user.id;
     
-    
+    // Query using user_id
     const { data, error } = await supabase
       .from('faculty_availability')
       .select(`
@@ -1018,7 +1019,7 @@ router.get('/available-subjects', authenticateUser, authorizeRoles("class_teache
           subject_code
         )
       `)
-      .eq('faculty_id', userId)
+      .eq('user_id', userId)
       .eq('is_available', true);
 
     if (error) {
@@ -1253,6 +1254,114 @@ router.delete("/subjects/:id", authenticateUser, authorizeRoles("class_teacher")
     res.status(200).json({ success: true, message: "Subject deleted successfully" });
   } catch (err) {
     console.error("Error deleting subject:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Update subject
+router.put("/subjects/:id", authenticateUser, authorizeRoles("class_teacher"), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { code, name, faculty_id, faculties } = req.body;
+    const classId = req.user.class_id;
+
+    if (!classId) {
+      return res.status(400).json({ success: false, error: "Missing class_id in token" });
+    }
+
+    // Verify subject belongs to this class
+    const { data: subject, error: subjectError } = await supabase
+      .from("subjects")
+      .select("id, class_id, type")
+      .eq("id", id)
+      .single();
+
+    if (subjectError || !subject) {
+      return res.status(404).json({ success: false, error: "Subject not found" });
+    }
+
+    if (subject.class_id !== classId) {
+      return res.status(403).json({ success: false, error: "Unauthorized to update this subject" });
+    }
+
+    // Update subject basic info
+    const { error: updateError } = await supabase
+      .from("subjects")
+      .update({
+        subject_code: code,
+        name: name,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", id);
+
+    if (updateError) throw updateError;
+
+    // Update faculty assignments
+    if (subject.type === 'theory' && faculty_id) {
+      // For theory subjects, update single faculty assignment
+      // Delete existing assignments
+      await supabase
+        .from("faculty_subjects")
+        .delete()
+        .eq("subject_id", id);
+
+      // Insert new assignment
+      const { error: facultyError } = await supabase
+        .from("faculty_subjects")
+        .insert({
+          faculty_id: faculty_id,
+          subject_id: id,
+          class_id: classId
+        });
+
+      if (facultyError) throw facultyError;
+
+    } else if (subject.type === 'practical' && faculties) {
+      // For practical subjects, update batch-wise faculty assignments
+      // Delete existing assignments
+      await supabase
+        .from("faculty_subjects")
+        .delete()
+        .eq("subject_id", id);
+
+      // Get batch IDs from batch names
+      const batchNames = Object.keys(faculties);
+      if (batchNames.length > 0) {
+        const { data: batchData, error: batchError } = await supabase
+          .from("batches")
+          .select("id, name")
+          .eq("class_id", classId)
+          .in("name", batchNames);
+
+        if (batchError) throw batchError;
+
+        // Insert new assignments for each batch
+        const assignments = [];
+        for (const batch of batchData) {
+          const facultyId = faculties[batch.name];
+          if (facultyId) {
+            assignments.push({
+              faculty_id: facultyId,
+              subject_id: id,
+              class_id: classId,
+              batch_id: batch.id
+            });
+          }
+        }
+
+        if (assignments.length > 0) {
+          const { error: insertError } = await supabase
+            .from("faculty_subjects")
+            .insert(assignments);
+
+          if (insertError) throw insertError;
+        }
+      }
+    }
+
+    res.status(200).json({ success: true, message: "Subject updated successfully" });
+  } catch (err) {
+    console.error("Error updating subject:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
